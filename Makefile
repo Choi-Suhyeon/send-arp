@@ -1,7 +1,7 @@
 all: send-arp
 
 send-arp: main.o
-	gcc -o send-arp main.o
+	gcc -o send-arp main.o -lpcap
 
 main.o: main.c
 	gcc -O2 -c -o main.o main.c
