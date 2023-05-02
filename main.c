@@ -47,11 +47,11 @@ typedef struct {
            * targetIPstr;
 } DoAttackParam, * pDoAttackParam;
 
-int32_t   readWholeTextData  (int8_t    * fileName,  int8_t        ** pBuffer);
-uint32_t  getSelfIPv4Addr    (int8_t    * interface);
-uint32_t  parseIPv4Addr      (int8_t    * ipAddrStr);
-int32_t   getSelfMacAddr     (int8_t    * interface, uint8_t       * out);
-int32_t   makeWholeArpPacket (MACheader * macHdr,    ARPheader     * arpHdr,   uint8_t  ** outBuf, int32_t * outSize);
+int32_t  readWholeTextData   (int8_t    * fileName,  int8_t        ** pBuffer);
+uint32_t getSelfIPv4Addr     (int8_t    * interface);
+uint32_t parseIPv4Addr       (int8_t    * ipAddrStr);
+int32_t  getSelfMacAddr      (int8_t    * interface, uint8_t       * out);
+int32_t  makeWholeArpPacket  (MACheader * macHdr,    ARPheader     * arpHdr,   uint8_t  ** outBuf, int32_t * outSize);
 uint32_t checkInterfaceName  (int8_t    * interfaceName);
 void     printBuffer         (int8_t    * title,     const uint8_t * buffer,   uint32_t size);
 void *   doAttack            (void      * vparam);
@@ -294,6 +294,7 @@ void * doAttack(void * vparam) {
     printBuffer("Sent Packet for ATTACK", buffer, bufSize);
 
     for (int32_t i = 0; i < param.sec; i++) {
+        printf("[send] : %s -> %s\n", param.interface, param.senderIPstr);
         pcap_sendpacket(pcap, buffer, bufSize);
         sleep(1);
     }
